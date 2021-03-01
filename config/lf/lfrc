@@ -1,0 +1,298 @@
+# size count
+cmd count ${{
+	du -sh * | sort -n
+}}
+# soft link
+# jump
+map g/ cd /
+map gm cd /mnt
+map gM cd ~/Music
+map g. cd ~/.config
+map gd cd ~/Documents
+map gD cd ~/Downloads
+map gG cd ~/github
+map gv cd ~/Video
+# compile
+# $fx current selected item
+cmd compile ${{
+	case ${fx##*.} in
+		tex) xelatex $fx $fx.pdf && rm *.aux *.log;;
+		sh)  sh $fx;;
+		py) python $fx;;
+		c) gcc $fx -o $fx && ./$fx;;
+	esac
+}} 
+map tp compile
+# about yank
+cmd yank-dirname $dirname -- "$f" | head -c-1 | xclip -i -selection clipboard
+cmd yank-path $printf '%s' "$fx" | xclip -i -selection clipboard
+cmd yank-basename $basename -a -- $fx | head -c-1 | xclip -i -selection clipboard
+
+cmd yank-basename-without-extension ${{
+    echo "$fx" |
+      xargs -r -d '\n' basename -a |
+      awk -e '{
+        for (i=length($0); i > 0; i--) {
+          if (substr($0, i, 1) == ".") {
+            if (i == 1) print $0
+            else print substr($0, 0, i-1)
+
+            break
+          }
+        }
+
+        if (i == 0)
+          print $0
+      }' |
+      if [ -n "$fs" ]; then cat; else tr -d '\n'; fi |
+      xclip -i -selection clipboard
+}}
+
+cmd yank-basename-without-extension &basename -a -- $fx | cut -d. -f1 | head -c-1 | xclip -i -selection clipboard
+
+map Yp yank-path
+map Yd yank-dirname
+map Yb yank-basename
+map YB yank-basename-without-extension
+# openwith
+cmd open-with %"$@" $fx
+map R push :open-with<space>
+# interpreter for shell commands (needs to be POSIX compatible)
+set shell sh
+set icons
+# toggle hidden
+map <backspace2> set hidden!
+# mkdir
+cmd md %mkdir "$@"
+map Md push :md<space>
+
+map A newfold
+
+cmd newfold ${{
+    set -f
+    printf "dir name:"
+    read newd
+    mkdir -- "$newd"
+    mv -- $fx "$newd"
+}}
+# edit new file
+cmd nvim ${{
+	$EDITOR "$@"
+}}
+map a push :nvim<space>
+# print hover item
+cmd echo ${{
+	echo "$fs"
+}}
+map P push :echo<enter>
+# show copy/move progress
+cmd paste &{{
+    set -- $(lf -remote load)
+    mode="$1"
+    shift
+    case "$mode" in
+        copy)
+            rsync -av --ignore-existing --progress -- "$@" . |
+            stdbuf -i0 -o0 -e0 tr '\r' '\n' |
+            while IFS= read -r line; do
+                lf -remote "send $id echo $line"
+            done
+            ;;
+        move) mv -n -- "$@" .;;
+    esac
+    lf -remote "send load"
+    lf -remote "send clear"
+}}
+# bulkrename
+cmd bulk-rename ${{
+    old="$(mktemp)"
+    new="$(mktemp)"
+    [ -n "$fs" ] && fs="$(ls)"
+    printf '%s\n' "$fs" >"$old"
+    printf '%s\n' "$fs" >"$new"
+    $EDITOR "$new"
+    [ "$(wc -l "$new")" -ne "$(wc -l "$old")" ] && exit
+    paste "$old" "$new" | while IFS= read -r names; do
+        src="$(printf '%s' "$names" | cut -f1)"
+        dst="$(printf '%s' "$names" | cut -f2)"
+        if [ "$src" = "$dst" ] || [ -e "$dst" ]; then
+            continue
+        fi
+        mv -- "$src" "$dst"
+    done
+    rm -- "$old" "$new"
+    lf -remote "send $id unselect"
+	lf -remote "send reload"
+}}
+map V push :bulk-rename<enter>
+# autojump
+cmd aj %lf -remote "send $id cd '$(autojump $1)'"
+map J push :aj<space>
+
+# git intergration
+cmd git_branch ${{
+    git branch | fzf | xargs git checkout 
+    pwd_shell=$(pwd)
+    lf -remote "send $id updir"
+    lf -remote "send $id cd \"$pwd_shell\""
+}}
+map gb :git_branch
+map gp ${{clear; git pull --rebase || true; echo "press ENTER"; read ENTER}}
+map gs ${{clear; git status; echo "press ENTER"; read ENTER}}
+map gl ${{clear; git log --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset' --abbrev-commit}}
+cmd on-cd &{{
+    # display git repository status in your prompt
+    source /usr/share/git/completion/git-prompt.sh
+    GIT_PS1_SHOWDIRTYSTATE=auto
+    GIT_PS1_SHOWSTASHSTATE=auto
+    GIT_PS1_SHOWUNTRACKEDFILES=auto
+    GIT_PS1_SHOWUPSTREAM=auto
+    GIT_PS1_COMPRESSSPARSESTATE=auto
+    git=$(__git_ps1 " [GIT BRANCH:> %s]") || true
+    fmt="\033[32;1m%u@%h\033[0m:\033[34;1m%w\033[0m\033[33;1m$git\033[0m"
+    lf -remote "send $id set promptfmt \"$fmt\""
+}}
+
+# fzf
+cmd fzf $vi $(find . -name "$1" | fzf)
+map f push :fzf<space>
+cmd fzf_jump ${{
+    res="$(find . -maxdepth 1 | fzf --reverse --header='Jump to location' | sed 's/\\/\\\\/g;s/"/\\"/g')"
+    if [ -d "$res" ]; then
+        cmd="cd"
+    else
+        cmd="select"
+    fi
+    lf -remote "send $id $cmd \"$res\""
+}}
+map <c-f> :fzf_jump
+
+# set '-eu' options for shell commands
+# These options are used to have safer shell commands. Option '-e' is used to
+# exit on error and option '-u' is used to give error for unset variables.
+# Option '-f' disables pathname expansion which can be useful when $f, $fs, and
+# $fx variables contain names with '*' or '?' characters. However, this option
+# is used selectively within individual commands as it can be limiting at
+# times.
+set shellopts '-eu'
+
+# set internal field separator (IFS) to "\n" for shell commands
+# This is useful to automatically split file names in $fs and $fx properly
+# since default file separator used in these variables (i.e. 'filesep' option)
+# is newline. You need to consider the values of these options and create your
+# commands accordingly.
+set ifs "\n"
+
+# leave some space at the top and the bottom of the screen
+set scrolloff 10
+
+# use enter for shell commands
+map <enter> shell
+
+# execute current file (must be executable)
+map x $$f
+map X !$f
+
+# dedicated keys for file opener actions
+map o &mimeopen $f
+map O $mimeopen --ask $f
+
+# define a custom 'open' command
+# This command is called when current file is not a directory. You may want to
+# use either file extensions and/or mime types here. Below uses an editor for
+# text files and a file opener for the rest.
+cmd open ${{
+    case $(file --mime-type $f -b) in
+        text/*) $EDITOR $fx;;
+        *) for f in $fx; do setsid $OPENER $f > /dev/null 2> /dev/null & done;;
+    esac
+}}
+
+# define a custom 'rename' command without prompt for overwrite
+# cmd rename %[ -e $1 ] && printf "file exists" || mv $f $1
+# map r push :rename<space>
+
+# make sure trash folder exists
+# %mkdir -p ~/.trash
+
+# move current file or selected files to trash folder
+# (also see 'man mv' for backup/overwrite options)
+cmd trash %set -f; mv $fx ~/.trash
+
+# define a custom 'delete' command
+cmd delete ${{
+	set -f
+	printf "$fx\n"
+	printf "delete?[y/n]"
+	read ans
+	[ $ans = "y" ] && rm -rf $fx
+}}
+
+# use '<delete>' key for either 'trash' or 'delete' command
+map <delete> trash
+map D delete
+
+# extract the current file with the right command
+# (xkcd link: https://xkcd.com/1168/)
+cmd extract ${{
+    set -f
+    case $f in
+        *.tar.bz|*.tar.bz2|*.tbz|*.tbz2) tar xjvf $f;;
+        *.tar.gz|*.tgz) tar xzvf $f;;
+        *.tar.xz|*.txz) tar xJvf $f;;
+        *.zip) unzip $f;;
+        *.rar) unrar x $f;;
+        *.7z) 7z x $f;;
+    esac
+}}
+cmd Extract ${{
+    set -f
+    case $f in
+        *.tar.bz|*.tar.bz2|*.tbz|*.tbz2) tar xjvf $f;;
+        *.tar.gz|*.tgz) tar xzvf $f;;
+        *.tar.xz|*.txz) tar xJvf $f;;
+        *.zip) unzip $f;;
+        *.rar) unrar x $f;;
+        *.7z) 7z x $f;;
+    esac
+	rm -rf $f
+}}
+
+map CE :Extract
+map Ce :extract
+
+# compress current file or selected files with tar and gunzip
+cmd Tar ${{
+    set -f
+    mkdir $1
+    cp -r $fx $1
+    tar czf $1.tar.gz $1
+    rm -rf $1
+}}
+cmd tar ${{
+    set -f
+    mkdir $1
+    cp -r $fx $1
+    tar czf $1.tar.gz $1
+}}
+
+map CT :Tar
+map Ct :tar $f
+
+# compress current file or selected files with zip
+cmd Zip ${{
+    set -f
+    mkdir $1
+    cp -r $fx $1
+    zip -r $1.zip $1
+    rm -rf $1
+}}
+cmd zip ${{
+    set -f
+    mkdir $1
+    cp -r $fx $1
+    zip -r $1.zip $1
+}}
+
+map CZ :Zip $f
+map Cz :zip $f
